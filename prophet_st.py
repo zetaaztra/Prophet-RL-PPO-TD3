@@ -153,6 +153,7 @@ tab1, tab2, tab3 = st.tabs(["🎯 Strategic Verdict", "🧬 Continuous AI", "�
 
 # ─── TAB 1: STRATEGIC ───
 with tab1:
+    # 1. TOP PULSE
     col1, col2, col3, col4 = st.columns(4)
     spot_display = f"{projected_spot:,.2f}"
     col1.metric("NIFTY 50 SPOT", spot_display, f"{gift_gap:+.1f} pts" if is_projected else f"{latest['returns']*100:.2f}%")
@@ -161,70 +162,126 @@ with tab1:
     col4.metric("REGIME (HMM)", f"REGIME {strategic_verdict['regime']}")
 
     st.divider()
-    
-    # MASTER VERDICT CARD
+
+    # 2. CRITICAL LEVELS (Table Style)
+    with st.container(border=True):
+        st.markdown("### 📊 CRITICAL LEVELS")
+        l_col1, l_col2 = st.columns(2)
+        with l_col1:
+            st.markdown("**AI (LSTM DEEP)**")
+            st.write(f"RESISTANCE (R1): `{sr_high:,.0f}` (Forecast)")
+            st.write(f"SUPPORT (S1): `{sr_low:,.0f}` (Forecast)")
+        with l_col2:
+            st.markdown("**TECHNICAL (MATH)**")
+            tech_res = projected_spot + (latest.get('atr', 100) * 2)
+            tech_sup = projected_spot - (latest.get('atr', 100) * 2)
+            st.write(f"RESISTANCE (R1): `{tech_res:,.0f}` (ATR*2)")
+            st.write(f"SUPPORT (S1): `{tech_sup:,.0f}` (ATR*2)")
+
+    # 3. TACTICAL EXECUTION MATRIX
+    with st.container(border=True):
+        st.markdown("### ⚡ TACTICAL EXECUTION MATRIX")
+        m_col1, m_col2 = st.columns(2)
+        with m_col1:
+            st.write(f"**BULLISH FLIP ABOVE :** `{flip_up:,.0f}`")
+            st.write(f"**BEARISH FLIP BELOW :** `{flip_down:,.0f}`")
+            st.write(f"**WHIPSAW ZONE       :** `{tac['band'][0]:,.0f} - {tac['band'][1]:,.0f}`")
+        with m_col2:
+            st.write(f"**OVERNIGHT GAP UP   :** `{gap_info['up_prob']*100:.0f}%` (Exp: {gap_info['expected_size']:+.0f} pts)")
+            st.write(f"**OVERNIGHT GAP DOWN :** `{gap_info['down_prob']*100:.0f}%` (Exp: {gap_info['expected_size']:+.0f} pts)")
+            st.write(f"**WHIPSAW RISK       :** `{(tac['whipsaw']*100):.1f}%` ({'HIGH' if tac['whipsaw'] > 0.7 else 'LOW'})")
+        
+        st.warning(f"**🛡️ FIREFIGHT TACTICS:** " + " | ".join(firefight_tactics))
+
+    # 4. INDIVIDUAL MODEL VERDICTS
+    with st.container(border=True):
+        st.markdown("### 🧠 INDIVIDUAL MODEL VERDICTS")
+        iv_col1, iv_col2, iv_col3 = st.columns(3)
+        with iv_col1:
+            st.markdown(f"**[HMM] REGIME: {strategic_verdict['regime']}**")
+            st.caption("→ Choppy waters. Wait for regime flip." if strategic_verdict['regime'] == 0 else "→ Bullish momentum active.")
+            st.markdown(f"**[LSTM] VALUATION:**")
+            val = "OVEREXTENDED" if projected_spot > sr_high else "UNDERVALUED" if projected_spot < sr_low else "NEUTRAL"
+            st.caption(f"→ {val} (Range: {sr_low:,.0f} - {sr_high:,.0f})")
+        with iv_col2:
+            st.markdown(f"**[TECH] INDICATORS: NEUTRAL**")
+            st.caption(f"→ RSI={rsi:.1f}, MACD={latest.get('macd', 0):.1f}. No strong signal.")
+            st.markdown(f"**[GAP] MOMENTUM: NEUTRAL**")
+            st.caption(f"→ No significant overnight gap predicted.")
+        with iv_col3:
+            st.markdown(f"**[PPO] RL AGENT:**")
+            ppo_bias = "HOLD" if strategic_verdict['bias'] == "NEUTRAL" else strategic_verdict['bias']
+            st.caption(f"→ {ppo_bias} (Conf: {strategic_verdict['confidence']:.1f}%)")
+
+    # 5. MASTER VERDICT (High Visibility)
     bias = strategic_verdict['bias']
     confidence = strategic_verdict['confidence']
     color_class = "bullish" if bias == "BULLISH" else "bearish" if bias == "BEARISH" else "neutral"
     
     st.markdown(f"""
     <div class="status-card {color_class}">
-        <h2 style='margin:0;'>{'STRICT TACTICAL VERDICT' if is_projected else 'AI PROPHET VERDICT'}: {bias}</h2>
-        <p style='color:#ccc; font-size: 1.1em;'>AI CONSENSUS LEVEL: <b>{confidence:.1f}%</b></p>
-        <p style='color:#888;'><b>REASONING:</b> {', '.join(strategic_verdict['notes']) if strategic_verdict['notes'] else 'Balanced indicators'}</p>
+        <h2 style='margin:0;'>MASTER VERDICT: {bias} (Conf: {confidence:.1f}%)</h2>
+        <p style='color:#ccc; font-size: 1.1em;'><b>DRIVER:</b> {strategic_verdict.get('driver', '[FUSION] Balanced across models')}</p>
+        <p style='color:#888;'><b>NOTES:</b> {', '.join(strategic_verdict['notes']) if strategic_verdict['notes'] else 'Consensus reached via technical & AI alignment'}</p>
     </div>
     """, unsafe_allow_html=True)
 
-    # TACTICAL EXECUTION MATRIX
-    st.subheader("═════════ TACTICAL EXECUTION MATRIX ═════════")
-    m_col1, m_col2 = st.columns(2)
-    with m_col1:
-        st.write(f"**BULLISH FLIP ABOVE:** `{flip_up:,.0f}`")
-        st.write(f"**BEARISH FLIP BELOW:** `{flip_down:,.0f}`")
-        st.write(f"**WHIPSAW ZONE:** `{tac['band'][0]:,.0f} - {tac['band'][1]:,.0f}`")
-    with m_col2:
-        st.write(f"**OVERNIGHT GAP UP:** `{gap_info['up_prob']*100:.0f}%` (Exp: {gap_info['expected_size']:+.0f} pts)")
-        st.write(f"**OVERNIGHT GAP DOWN:** `{gap_info['down_prob']*100:.0f}%` (Exp: {gap_info['expected_size']:+.0f} pts)")
-        st.write(f"**WHIPSAW RISK:** `{(tac['whipsaw']*100):.1f}%` ({'HIGH' if tac['whipsaw'] > 0.7 else 'LOW'})")
-
-    st.info("**🛡️ FIREFIGHT TACTICS:** " + " | ".join(firefight_tactics))
-
-    st.divider()
-    # ACTIONABLE TRADE
-    st.subheader("🛠️ ACTIONABLE TRADE")
-    
-    # [DYNAMIC STRIKE LOGIC]
-    strategy = "NO TRADE"
-    vix_range_pct = 0.015 * (vix / 15)
-
-    if vix > 22:
-        if bias == "BULLISH" and confidence > 50: strategy = "Bull Put Spread (Defensive)"
-        elif bias == "BEARISH" and confidence > 50: strategy = "Bear Put Spread (Defensive)"
-        else: strategy = "NO TRADE"
-    elif vix < 12:
-        if bias == "NEUTRAL": strategy = "NO TRADE"
-        else: strategy = "Naked Options (Low Premium)"
-    else:
-        if bias == "BULLISH": strategy = "Bull Call Spread (+0.5% Target)"
-        elif bias == "BEARISH": strategy = "Bear Put Spread (-0.5% Target)"
-        else: strategy = "Iron Condor (VIX Dynamic)"
-
-    t_col1, t_col2 = st.columns(2)
-    with t_col1:
-        if strategy == "NO TRADE":
-            st.error(f"**STRATEGY:** {strategy} (VIX Filter/Neutral Bias)")
+    # 6. ACTIONABLE TRADE
+    with st.container(border=True):
+        st.markdown("### 🛠️ ACTIONABLE TRADE")
+        vix_range_pct = 0.015 * (vix / 15)
+        strategy = "NO TRADE"
+        if vix > 22:
+            if bias == "BULLISH" and confidence > 50: strategy = "Bull Put Spread (Defensive)"
+            elif bias == "BEARISH" and confidence > 50: strategy = "Bear Put Spread (Defensive)"
+        elif vix < 12:
+            if bias == "NEUTRAL": strategy = "NO TRADE"
+            else: strategy = "Naked Options (Low Premium)"
         else:
-            st.success(f"**STRATEGY:** {strategy}")
+            if bias == "BULLISH": strategy = "Bull Call Spread (+0.5% Target)"
+            elif bias == "BEARISH": strategy = "Bear Put Spread (-0.5% Target)"
+            else: strategy = "Iron Condor (VIX Dynamic)"
+
+        t_col1, t_col2 = st.columns(2)
+        with t_col1:
+            st.info(f"**STRATEGY:** {strategy}")
             if "Iron Condor" in strategy:
                 ce = round((projected_spot * (1 + vix_range_pct))/50)*50
                 pe = round((projected_spot * (1 - vix_range_pct))/50)*50
-                st.write(f"**STRIKES:** SELL {ce:.0f} CE / {pe:.0f} PE")
+                st.success(f"**STRIKES :** SELL {ce:,.0f} CE / {pe:,.0f} PE")
+                st.caption(f"**RANGE   :** {vix_range_pct*100:.2f}% ({pe:,.0f} - {ce:,.0f})")
             else:
-                st.write(f"**STRIKES:** ATM ({round(projected_spot/100)*100:.0f}) Spreads")
-    
-    with t_col2:
-        rec_prob = prophet.predict_recovery(projected_spot, projected_spot * 1.005)
-        st.metric("RECOVERY PROB (+0.5% Bounce)", f"{rec_prob*100:.1f}%")
+                st.success(f"**STRIKES :** ATM ({round(projected_spot/100)*100:.0f}) Spreads")
+        with t_col2:
+            rec_prob = prophet.predict_recovery(projected_spot, projected_spot * 1.005)
+            st.metric("RECOVERY PROB (+0.5% Bounce)", f"{rec_prob*100:.1f}%")
+            st.write(f"**FIREFIGHT:** {'🔥 ACTIVE' if tac['firefight'] else '✅ SAFE (No Climax Reversal)'}")
+
+    # 7. GLOBAL PULSE MATRIX
+    with st.container(border=True):
+        st.markdown("### 🌐 GLOBAL & HEAVYWEIGHT PULSE MATRIX")
+        gp_col1, gp_col2, gp_col3, gp_col4, gp_col5 = st.columns(5)
+        gp_col1.metric("RELIANCE", f"{latest.get('close_rel', 0):,.2f}", f"{latest.get('ret_rel', 0):+.2f}%")
+        gp_col2.metric("HDFCBANK", f"{latest.get('close_hdfc', 0):,.2f}", f"{latest.get('ret_hdfc', 0):+.2f}%")
+        gp_col3.metric("ICICIBANK", f"{latest.get('close_icici', 0):,.2f}", f"{latest.get('ret_icici', 0):+.2f}%")
+        gp_col4.metric("TCS", f"{latest.get('close_tcs', 0):,.2f}", f"{latest.get('ret_tcs', 0):+.2f}%")
+        gp_col5.metric("INFY", f"{latest.get('close_infy', 0):,.2f}", f"{latest.get('ret_infy', 0):+.2f}%")
+        st.write(f"**S&P 500:** {latest.get('sp_close', 0):,.2f} | **Correlation:** {latest.get('sp_corr_30', 0.05):.2f}")
+
+    # 8. MANUAL CO-PILOT GUIDE
+    with st.expander("🦅 THE MANUAL CO-PILOT GUIDE (ELI5)", expanded=True):
+        st.write("""
+        1. **HOW TO READ CONVICTION:**
+           - Confidence > 50% : **HIGH** conviction. Full position sizing.
+           - Confidence < 30% : **LOW** conviction. Half-size or skip.
+        2. **WHERE TO PLACE ARMOR (STRIKES):**
+           - Always use the 'STRIKES' suggested above as your boundaries.
+           - They scale with volatility (VIX) to keep you in the 'Safe Zone'.
+        3. **THE GOLDEN RULES:**
+           - **IF VIX < 12:** DO NOT SELL options (Neutral Iron Condors).
+           - **IF RSI > 70:** Be extra cautious with Bullish bets.
+           - **IF FIREFIGHT is ACTIVE:** Prioritize getting out over making profit.
+        """)
 
 # ─── TAB 2: CONTINUOUS AI ───
 with tab2:
@@ -285,24 +342,45 @@ with tab2:
 # ─── TAB 3: ELI5 GUIDE ───
 with tab3:
     st.markdown("## 🦅 NIFTY Prophet ELI5 Guide")
-    st.write("""
-    ### 1. The Triple Brain
-    - **HMM (The Judge)**: Senses market "weather" (Regimes).
-    - **LSTM (The Architect)**: Builds the "digital fence" (S/R levels).
-    - **RL (The Pilot)**: Decides the betting power (Conviction).
-
-    ### 2. The Logic Hierarchy
-    - **Directional bets** are AI-based (Thinking).
-    - **Safety zones & Survival** are Math-based (Physics).
     
-    ### 3. Golden Rules
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.write("""
+        ### 1. The Triple Brain
+        - **HMM (The Judge)**: Senses market "weather" (Regimes).
+        - **LSTM (The Architect)**: Builds the "digital fence" (S/R levels).
+        - **RL (The Pilot)**: Decides the betting power (Conviction).
+
+        ### 2. The Logic Hierarchy
+        - **Directional bets** are AI-based (Thinking).
+        - **Safety zones & Survival** are Math-based (Physics).
+        """)
+    
+    with col_b:
+        st.write("""
+        ### 3. RL Algorithm Nuances
+        - **PPO (Commander)**: Tells you **"What to Do"**. It picks a side (Buy/Sell/Hold).
+        - **SAC & TD3 (Tacticians)**: Tell you **"How Strong the Move is"**. They measure the precise intensity of the pulse.
+        
+        ### 4. Grasping the "Mismatch"
+        **Scenario:** *PPO Neutral | SAC Bullish | TD3 Bearish*
+        - **Interpretation:** This is a **Conflict Zone**. 
+        - **Action:** SAC senses a breakout, TD3 fears a crash, and PPO is confused. **STAY IN CASH** or use a neutral Iron Condor with wider stops.
+        """)
+
+    st.divider()
+    st.write("""
+    ### 5. Golden Rules
     - **Trust the VIX**: If the app says 'NO TRADE', stay in cash!
     - **Trust the Fence**: Don't buy if the price is hitting the ceiling.
     - **GIFT Nifty**: Always enter the morning gap points to see the *Projected* verdict.
     """)
     
     if st.checkbox("Show 90-Dimension Matrix (Latest)"):
-        st.dataframe(prophet.data_1d.tail(10).T)
+        matrix_df = prophet.data_1d.copy()
+        # Convert date to string to prevent transposition type-casting errors
+        matrix_df['date'] = matrix_df['date'].dt.strftime('%Y-%m-%d')
+        st.dataframe(matrix_df.set_index('date').tail(10).T)
 
 st.divider()
 st.caption("Disclaimer: This tool is for research purposes. Trading options involves significant risk.")
