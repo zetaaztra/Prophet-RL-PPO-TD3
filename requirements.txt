@@ -1,11 +1,11 @@
 streamlit
 pandas
-numpy==1.26.4
+numpy>=2.2.6
 plotly
 yfinance
-stable-baselines3==2.3.2
+stable-baselines3
 shimmy
 gymnasium
 hmmlearn
 pandas_ta
-tensorflow==2.16.1
+tensorflow>=2.20.0
