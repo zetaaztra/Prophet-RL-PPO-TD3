@@ -71,9 +71,12 @@ class ProphetConfig:
     DATA_DIR = os.path.join(BASE_DIR, "data")
     MODEL_DIR = os.path.join(BASE_DIR, "models")
     
-    # 15M Data (From v1 directory, shared for cost efficiency)
-    NIFTY_15M_CSV = os.path.join(os.path.dirname(BASE_DIR), "v1", "app", "python", "nifty_15m_2001_to_now.csv")
-    VIX_15M_CSV = os.path.join(os.path.dirname(BASE_DIR), "v1", "app", "python", "INDIAVIX_15minute_2001_now.csv")
+    # 15M Data (Cloud-Resilient: Checks v1 path, then local v3/data path)
+    _v1_nifty = os.path.join(os.path.dirname(BASE_DIR), "v1", "app", "python", "nifty_15m_2001_to_now.csv")
+    _v1_vix = os.path.join(os.path.dirname(BASE_DIR), "v1", "app", "python", "INDIAVIX_15minute_2001_now.csv")
+    
+    NIFTY_15M_CSV = _v1_nifty if os.path.exists(_v1_nifty) else os.path.join(DATA_DIR, "nifty_15m_2001_to_now.csv")
+    VIX_15M_CSV = _v1_vix if os.path.exists(_v1_vix) else os.path.join(DATA_DIR, "INDIAVIX_15minute_2001_now.csv")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. DATA ENGINE (v1 PORT)
