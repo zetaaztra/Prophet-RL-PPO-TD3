@@ -410,15 +410,15 @@ class NiftyOptionsProphet:
             print("[RL] Stable Baselines 3 not installed. Skipping PPO training.")
             return
 
-        print(f"[RL] Training PPO Agent (Discrete Policy) on {len(self.feature_cols)} Features...")
+        print(f"[RL] Training PPO Agent (Deep Veteran Mode) on {len(self.feature_cols)} Features...")
         
         # Create Environment
         self.rl_env = DummyVecEnv([lambda: OptionsProphetEnv(self.data_1d, self.feature_cols, continuous=False)])
         
-        # Train Agent (Fast Interactive Training)
+        # Train Agent (Production Grade: 100,000 High-Fidelity Steps)
         self.ppo_model = PPO("MlpPolicy", self.rl_env, verbose=0, learning_rate=0.0003, ent_coef=0.01)
-        self.ppo_model.learn(total_timesteps=3000) # Quick training (can increase for prod)
-        print("[RL] PPO Agent Trained.")
+        self.ppo_model.learn(total_timesteps=100000) 
+        print("[RL] PPO Agent Trained (High Fidelity: 100k Steps).")
 
     def get_rl_verdict(self):
         """

@@ -209,7 +209,7 @@ with tab1:
             st.markdown(f"**[GAP] MOMENTUM: NEUTRAL**")
             st.caption(f"→ No significant overnight gap predicted.")
         with iv_col3:
-            st.markdown(f"**[PPO] RL AGENT:**")
+            st.markdown(f"**[PPO] RL AGENT: [DEEP VETERAN: 100k Steps]**")
             ppo_bias = "HOLD" if strategic_verdict['bias'] == "NEUTRAL" else strategic_verdict['bias']
             st.caption(f"→ {ppo_bias} (Conf: {strategic_verdict['confidence']:.1f}%)")
 
