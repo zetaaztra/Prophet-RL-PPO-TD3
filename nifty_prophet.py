@@ -263,16 +263,20 @@ class NiftyOptionsProphet:
         df['willr'] = df.ta.willr(length=14)
         
         macd = df.ta.macd()
-        df['macd'] = macd['MACD_12_26_9']
-        df['macd_h'] = macd['MACDh_12_26_9']
-        df['macd_s'] = macd['MACDs_12_26_9']
+        if macd is not None:
+            # Robust mapping for MACD columns (MACD, HIST, SIGNAL)
+            df['macd'] = macd.iloc[:, 0]
+            df['macd_h'] = macd.iloc[:, 1]
+            df['macd_s'] = macd.iloc[:, 2]
         
         # 4. Volatility Structure (Advanced) [NEW]
         bb = df.ta.bbands(length=20)
-        df['bb_high'] = bb['BBU_20_2.0']
-        df['bb_low'] = bb['BBL_20_2.0']
-        df['bb_width'] = bb['BBB_20_2.0']
-        df['bb_pos'] = (df['close'] - df['bb_low']) / (df['bb_high'] - df['bb_low']) # Position in band
+        if bb is not None:
+            # Robust mapping for BBands: 0=Lower, 1=Mid, 2=Upper, 3=Bandwidth, 4=Percent
+            df['bb_low'] = bb.iloc[:, 0]
+            df['bb_high'] = bb.iloc[:, 2]
+            df['bb_width'] = bb.iloc[:, 3]
+            df['bb_pos'] = (df['close'] - df['bb_low']) / (df['bb_high'] - df['bb_low']) # Position in band
         
         df['atr'] = df.ta.atr(length=14)
         df['natr'] = (df['atr'] / df['close']) * 100

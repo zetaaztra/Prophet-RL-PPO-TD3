@@ -103,4 +103,4 @@ if __name__ == "__main__":
     else:
         model = "SAC"
         
-    run_continuous_agent(model, timesteps=5000)
+    run_continuous_agent(model, timesteps=100000)
