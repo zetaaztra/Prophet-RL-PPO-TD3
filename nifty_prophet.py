@@ -58,7 +58,7 @@ class ProphetConfig:
     SYMBOL = "^NSEI"
     VIX_SYMBOL = "^INDIAVIX"
     SP500_SYMBOL = "^GSPC"
-    TRAIN_YEARS = 10  # Default lookback
+    TRAIN_YEARS = 3   # Modern Context Default (captures 2021-2024 dynamics)
     
     # Heavyweights
     RELIANCE = "RELIANCE.NS"
@@ -607,16 +607,16 @@ class NiftyOptionsProphet:
     # ═══════════════════════════════════════════════════════════════════════
     # RECOVERY PROBABILITY (Brownian Pattern Matching)
     # ═══════════════════════════════════════════════════════════════════════
-    def predict_recovery(self, entry, target):
+    def predict_recovery(self, target_price):
         """
-        Estimate probability of price reaching target within 5 trading days
-        Uses historical volatility and distance-based Brownian motion
+        Estimate probability of price REACHING target_price within 5 trading days
+        Uses the Reflection Principle of Brownian Motion
         """
         df = self.data_1d
         current = df['close'].iloc[-1]
         
         # Distance from current price to target
-        dist_pct = abs(target - current) / current
+        dist_pct = abs(target_price - current) / current
         
         # Daily volatility (annualized / sqrt(252))
         vol_daily = df['volatility'].iloc[-1] / np.sqrt(252)
@@ -624,12 +624,15 @@ class NiftyOptionsProphet:
         # 5-day window: vol scales with sqrt(time)
         vol_5d = vol_daily * np.sqrt(5)
         
-        # Probability using normal CDF
-        # P(reaching target) = 2 * (1 - norm.cdf(distance / volatility))
+        # Probability using Reflection Principle: P(max_T >= H) = 2 * P(W_T >= H)
+        # We assume zero drift for a conservative 'random walk' estimate
         z_score = dist_pct / vol_5d if vol_5d > 0 else 10
-        prob = 2 * (1 - norm.cdf(z_score))
         
-        return max(0.05, min(0.95, prob))
+        # Probability of TOUCHING the level within 5 days
+        import scipy.stats as stats
+        prob = 2 * (1 - stats.norm.cdf(z_score))
+        
+        return max(0.01, min(0.99, prob))
 
     # ═══════════════════════════════════════════════════════════════════════
     # FUSION SENTIMENT (The "Mind" of the Prophet)
@@ -1173,6 +1176,18 @@ class OptionsProphetEnv(gym.Env):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # Allow manual override via CLI or default to Config
+    try:
+        if len(sys.argv) > 1:
+            ProphetConfig.TRAIN_YEARS = int(sys.argv[1])
+        else:
+            print("\n" + "─"*50)
+            years_input = input(f"Enter lookback years (Enter for default {ProphetConfig.TRAIN_YEARS}y): ").strip()
+            if years_input:
+                ProphetConfig.TRAIN_YEARS = int(years_input)
+    except:
+        print("[!] Invalid input. Using defaults.")
+
     prophet = NiftyOptionsProphet()
     prophet.initialize()
     
@@ -1195,7 +1210,7 @@ if __name__ == "__main__":
         try:
             entry_p = float(entry_input)
             spot_p = prophet.data_1d['close'].iloc[-1]
-            prob = prophet.predict_recovery(entry_p, spot_p)
+            prob = prophet.predict_recovery(entry_p)
             print(f"[📊] Probability of Return to {entry_p:,.0f} (5-day window): {prob*100:.1f}%")
         except:
             print("[!] Invalid entry price.")

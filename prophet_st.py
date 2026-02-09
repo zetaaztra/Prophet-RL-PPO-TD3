@@ -253,7 +253,7 @@ with tab1:
             else:
                 st.success(f"**STRIKES :** ATM ({round(projected_spot/100)*100:.0f}) Spreads")
         with t_col2:
-            rec_prob = prophet.predict_recovery(projected_spot, projected_spot * 1.005)
+            rec_prob = prophet.predict_recovery(projected_spot * 1.005)
             st.metric("RECOVERY PROB (+0.5% Bounce)", f"{rec_prob*100:.1f}%")
             st.write(f"**FIREFIGHT:** {'🔥 ACTIVE' if tac['firefight'] else '✅ SAFE (No Climax Reversal)'}")
 
