@@ -27,6 +27,7 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
 from hmmlearn.hmm import GaussianHMM
+from scipy.stats import norm
 
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, Model, load_model
@@ -57,6 +58,7 @@ class ProphetConfig:
     SYMBOL = "^NSEI"
     VIX_SYMBOL = "^INDIAVIX"
     SP500_SYMBOL = "^GSPC"
+    TRAIN_YEARS = 10  # Default lookback
     
     # Heavyweights
     RELIANCE = "RELIANCE.NS"
@@ -111,25 +113,38 @@ class DataManager:
 
 class DataEngine:
     @staticmethod
-    def fetch_historical(symbol, name, years=10):
-        print(f"[PROPHET] Fetching {name} data...")
+    def fetch_historical(symbol, name, years=None):
+        if years is None:
+            years = ProphetConfig.TRAIN_YEARS
+        print(f"[PROPHET] Fetching {name} data ({years}y)...")
         end = datetime.now()
         start = end - timedelta(days=years*365)
+        df = yf.download(symbol, start=start, end=end, progress=False)
+        
+        # Handle MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df = df.reset_index()
+        df.columns = [col.lower() for col in df.columns]
+        df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+            
+        return DataManager.sync_data(name, df)
+
+    @staticmethod
+    def fetch_live_price(symbol):
+        """Fetch live price using 1m interval as per V1 logic"""
         try:
-            data = yf.download(symbol, start=start, end=end, progress=False)
-            if data.empty: return None
-            
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
-            
-            data = data.reset_index()
-            data.columns = [c.lower() for c in data.columns]
-            data['date'] = pd.to_datetime(data['date']).dt.tz_localize(None)
-            
-            return DataManager.sync_data(name, data)
+            live_data = yf.download(symbol, period="5d", interval="1m", progress=False)
+            if not live_data.empty:
+                if isinstance(live_data.columns, pd.MultiIndex):
+                    close_prices = live_data['Close']
+                    if hasattr(close_prices, 'iloc'):
+                        return float(close_prices.iloc[-1].iloc[0] if isinstance(close_prices.iloc[-1], pd.Series) else close_prices.iloc[-1])
+                return float(live_data['Close'].iloc[-1])
         except Exception as e:
-            print(f"[ERROR] {name} fetch failed: {e}")
-            return None
+            print(f"[WARNING] Live fetch failed for {symbol}: {e}")
+        return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. THE PROPHET MONOLITH
@@ -145,15 +160,24 @@ class NiftyOptionsProphet:
         self.scaler = StandardScaler()
         self.price_scaler = MinMaxScaler()
         self.regime_map = {}
+        self.hmm_features = [] # [NEW] Track HMM specific features
         
     def initialize(self):
         print("\n" + "="*50)
-        print("  NIFTY PROPHET v3 - INITIALIZING ENGINE")
+        print(f"  NIFTY PROPHET v3 - INITIALIZING ENGINE (Lookback: {ProphetConfig.TRAIN_YEARS}y)")
         print("="*50)
-        
-        # 1. Fetch Core Data
+        # 1. Load Primary Data
         self.data_1d = DataEngine.fetch_historical(ProphetConfig.SYMBOL, "NIFTY_50")
         vix = DataEngine.fetch_historical(ProphetConfig.VIX_SYMBOL, "VIX")
+        
+        # Merge VIX initial data
+        vix_clean = vix[['date', 'close']].rename(columns={'close': 'vix'})
+        self.data_1d = self.data_1d.merge(vix_clean, on='date', how='left').ffill()
+
+        # 1b. Sync Live Data (V1 Pattern: Fresh price at startup)
+        self.sync_live_data()
+
+        # 2. Get Heavyweights & Global Pulse
         sp500 = DataEngine.fetch_historical(ProphetConfig.SP500_SYMBOL, "SP500")
         
         # Fetch Heavyweights
@@ -166,8 +190,6 @@ class NiftyOptionsProphet:
                 heavy_data[name] = df.rename(columns={'close': f'close_{name.lower()}'})[['date', f'close_{name.lower()}']]
 
         if self.data_1d is not None:
-            if vix is not None:
-                self.data_1d = self.data_1d.merge(vix.rename(columns={'close': 'vix'})[['date', 'vix']], on='date', how='left')
             if sp500 is not None:
                 self.data_1d = self.data_1d.merge(sp500.rename(columns={'close': 'sp_close'})[['date', 'sp_close']], on='date', how='left')
             
@@ -183,6 +205,32 @@ class NiftyOptionsProphet:
         self.load_15m()
         
         print("[OK] Prophet Engine Ready.")
+
+    def sync_live_data(self):
+        """
+        Refetch the latest Spot and VIX prices from yfinance (V1 Style)
+        Ensures the dashboard uses 'NOW' prices instead of 'PREVIOUS CLOSE'
+        """
+        live_spot = DataEngine.fetch_live_price(ProphetConfig.SYMBOL)
+        live_vix = DataEngine.fetch_live_price(ProphetConfig.VIX_SYMBOL)
+        
+        if live_spot:
+            # If today's row exists, update it. Otherwise append.
+            last_date = self.data_1d['date'].iloc[-1].date()
+            if last_date == datetime.now().date():
+                self.data_1d.loc[self.data_1d.index[-1], 'close'] = live_spot
+                print(f"[SYNC] Updated today's Spot: {live_spot:.2f}")
+            else:
+                new_row = self.data_1d.iloc[-1].copy()
+                new_row['date'] = pd.Timestamp(datetime.now())
+                new_row['close'] = live_spot
+                # We need to fill columns that depend on close if we append
+                self.data_1d = pd.concat([self.data_1d, pd.DataFrame([new_row])], ignore_index=True)
+                print(f"[SYNC] Appended Live Spot: {live_spot:.2f}")
+                
+        if live_vix:
+            self.data_1d.loc[self.data_1d.index[-1], 'vix'] = live_vix
+            print(f"[SYNC] Updated latest VIX: {live_vix:.2f}")
 
     def engineer_features(self):
         df = self.data_1d
@@ -247,6 +295,14 @@ class NiftyOptionsProphet:
         df['body_size'] = abs(df['close'] - df['open'])
         df['candle_range'] = df['high'] - df['low']
         df['body_pct'] = df['body_size'] / df['candle_range'] # 1.0 = Marubozu, 0.0 = Doji
+
+        # 6. Gap Intel [NEW]
+        df['gap'] = (df['open'] - df['close'].shift(1)) / df['close'].shift(1)
+        df['gap_up'] = (df['gap'] > 0.001).astype(int)
+        df['gap_down'] = (df['gap'] < -0.001).astype(int)
+        df['gap_up_rate'] = df['gap_up'].rolling(10).mean()
+        df['gap_down_rate'] = df['gap_down'].rolling(10).mean()
+        df['gap_std'] = df['gap'].rolling(20).std()
         
         # Wick Logic
         df['upper_wick'] = df['high'] - df[['open', 'close']].max(axis=1)
@@ -310,29 +366,73 @@ class NiftyOptionsProphet:
     # HMM REGIME DETECTION
     # ═══════════════════════════════════════════════════════════════════════
     def train_hmm(self, n_components=3):
-        print("\n[HMM] Training Market Regime Detector...")
-        # Use a high-quality subset for HMM to avoid collinearity
-        hmm_features = ['returns', 'volatility', 'rsi_14', 'macd_h', 'bb_width']
-        if 'sp_returns' in self.data_1d.columns: hmm_features.append('sp_returns')
+        """
+        Train Gaussian HMM to detect market regimes (Bearish/Neutral/Bullish)
+        Uses 'returns' and 'volatility' as features
+        """
+        # Define features for HMM
+        self.hmm_features = ['returns', 'volatility']
         
-        X = self.data_1d[hmm_features].values
-        X = self.scaler.fit_transform(X)
+        # Ensure we have clean data
+        dataset = self.data_1d.copy().dropna()
+        X = dataset[self.hmm_features].values
         
-        self.hmm_model = GaussianHMM(n_components=n_components, covariance_type="full", n_iter=100)
-        self.hmm_model.fit(X)
+        # Train HMM with SCALED data (Important for feature consistency)
+        X_scaled = self.scaler.fit_transform(X)
         
-        hidden_states = self.hmm_model.predict(X)
-        self.data_1d['regime'] = hidden_states
-        
-        # Map regimes by return mean
-        stats = []
-        for i in range(n_components):
-            stats.append((i, self.data_1d[self.data_1d['regime']==i]['returns'].mean()))
-        stats.sort(key=lambda x: x[1])
-        
-        self.regime_map = {stats[0][0]: 'BEARISH', stats[1][0]: 'NEUTRAL', stats[2][0]: 'BULLISH'}
-        print(f"[MAP] Regime Mapping: {self.regime_map}")
+        self.hmm_model = GaussianHMM(n_components=n_components, covariance_type="full", n_iter=100, random_state=42)
+        self.hmm_model.fit(X_scaled)
+        self.hmm_labels = self.hmm_model.predict(X_scaled)
+        self.data_1d['regime'] = self.hmm_labels
 
+        
+        # Map hidden states to regimes based on average return
+        means = []
+        for i in range(n_components):
+            means.append(dataset.iloc[self.hmm_labels == i]['returns'].mean())
+            
+        # Sort states by return: 0=Bearish (Lowest), 1=Neutral, 2=Bullish (Highest)
+        sorted_indices = np.argsort(means)
+        self.regime_map = {old: new for new, old in enumerate(sorted_indices)}
+        
+        print(f"[HMM] Training Market Regime Detector...")
+        print(f"[MAP] Regime Mapping: {self.regime_map}") # 0: BEARISH, 1: NEUTRAL, 2: BULLISH
+
+    def train_rl_agent(self):
+        """
+        Train PPO Reinforcement Learning Agent on the fly
+        Uses the Deep Intelligent Matrix (84+ Dimensions)
+        """
+        if not SB3_AVAILABLE:
+            print("[RL] Stable Baselines 3 not installed. Skipping PPO training.")
+            return
+
+        print(f"[RL] Training PPO Agent (Discrete Policy) on {len(self.feature_cols)} Features...")
+        
+        # Create Environment
+        self.rl_env = DummyVecEnv([lambda: OptionsProphetEnv(self.data_1d, self.feature_cols, continuous=False)])
+        
+        # Train Agent (Fast Interactive Training)
+        self.ppo_model = PPO("MlpPolicy", self.rl_env, verbose=0, learning_rate=0.0003, ent_coef=0.01)
+        self.ppo_model.learn(total_timesteps=3000) # Quick training (can increase for prod)
+        print("[RL] PPO Agent Trained.")
+
+    def get_rl_verdict(self):
+        """
+        Get the latest action from the trained PPO agent
+        """
+        if not self.ppo_model:
+            return "N/A", "Agent not active"
+        
+        # Get latest observation
+        last_obs = self.data_1d.iloc[-1][self.feature_cols].values.astype(np.float32)
+        action, _ = self.ppo_model.predict(last_obs, deterministic=True)
+        
+        act = int(action)
+        if act == 1: return "BULLISH", "Strong Buy Signal (Long Delta)"
+        if act == 2: return "BEARISH", "Strong Sell Signal (Short Delta)"
+        if act == 3: return "NEUTRAL", "Price Stability Expected (Iron Condor)"
+        return "HOLD", "No Clear Signal (Cash is King)"
     def train_lstm_sr(self, sequence_length=60):
         print("\n[LSTM] Training Support/Resistance LSTM...")
         df = self.data_1d.copy()
@@ -395,27 +495,151 @@ class NiftyOptionsProphet:
         w_prob = min(1.0, flips / (lookback * 15))
         firefight = w_prob > 0.8 and self.data_1d['volatility'].iloc[-1] > 0.25
         
-        return {"whipsaw": w_prob, "firefight": firefight}
+        # Whipsaw Band (Volatility Channel)
+        spot = self.data_1d['close'].iloc[-1]
+        atr = self.data_1d['atr'].iloc[-1] if 'atr' in self.data_1d else (spot * 0.005)
+        whip_low = spot - (atr * 1.5)
+        whip_high = spot + (atr * 1.5)
+
+        return {"whipsaw": w_prob, "firefight": firefight, "band": (whip_low, whip_high)}
+
+    def rebuild_row_with_spot(self, target_spot):
+        """
+        Simulate a data row at a hypothetical price level for HMM scanning
+        Enhanced: Approximates RSI and Volatility shifts
+        """
+        row = self.data_1d.iloc[-1].copy()
+        old_close = self.data_1d['close'].iloc[-2]
+        
+        row['close'] = target_spot
+        row['returns'] = (target_spot - old_close) / old_close
+        
+        # Approximate RSI Shift: A big move up increases average gains
+        if row['returns'] > 0.005: # > 0.5% move
+            row['rsi_14'] = min(85, row['rsi_14'] + (row['returns'] * 1000))
+        elif row['returns'] < -0.005:
+            row['rsi_14'] = max(15, row['rsi_14'] + (row['returns'] * 1000))
+            
+        # MACD Histogram shift (rough proxy)
+        row['macd_h'] += row['returns'] * 50
+        
+        return row
+
+    def find_flip_levels(self):
+        """
+        Scan price levels to find where the Market Regime changes
+        Enhanced: Uses wider scan range and reports confidence
+        """
+        spot = getattr(self, 'projected_spot', self.data_1d['close'].iloc[-1])
+        current_regime = self.data_1d['regime'].iloc[-1]
+        
+        # Scan +/- 5% (wider range for better detection)
+        prices = np.linspace(spot * 0.95, spot * 1.05, 100)
+        
+        # [ROBUSTNESS CHECK] Ensure scaler is fitted
+        from sklearn.utils.validation import check_is_fitted, NotFittedError
+        try:
+            check_is_fitted(self.scaler)
+        except NotFittedError:
+            print("[WARN] Scaler state lost. Recovering via re-fit...")
+            # Re-fit using known HMM features
+            scan_data = self.data_1d.copy().dropna()
+            self.scaler.fit(scan_data[self.hmm_features].values)
+        
+        flip_up = None
+        flip_down = None
+        
+        for p in prices:
+            sim_row = self.rebuild_row_with_spot(p)
+            # Use same feature engineering and SCALER as training
+            feat_vals = sim_row[self.hmm_features].values.reshape(1, -1)
+            feat_vals_scaled = self.scaler.transform(feat_vals)
+            pred_regime = self.hmm_model.predict(feat_vals_scaled)[0]
+            
+            if p > spot and pred_regime != current_regime and flip_up is None:
+                flip_up = p
+            if p < spot and pred_regime != current_regime and flip_down is None:
+                flip_down = p
+        
+        # If no flip found, use LSTM S/R as fallback
+        if flip_up is None or flip_down is None:
+            sr_low, sr_high = self.get_lstm_prediction()
+            if flip_up is None and sr_high:
+                flip_up = sr_high  # Resistance as bullish trigger
+            if flip_down is None and sr_low:
+                flip_down = sr_low  # Support as bearish trigger
+                
+        return flip_down, flip_up
+
+    def get_firefight_tactics(self, sentiment, tactical, gap_info):
+        """
+        Contextual defense strategies based on regime and divergence
+        """
+        regime = self.regime_map.get(self.data_1d['regime'].iloc[-1], "UNKNOWN")
+        bias = sentiment['bias']
+        
+        tactics = []
+        
+        if tactical['whipsaw'] > 0.7:
+            tactics.append("CHOP ALERT: Use wider stops. Avoid aggressive buying.")
+        
+        if sentiment['divergence'] and "BEARISH_DIVERGENT" in sentiment['divergence']:
+            tactics.append("HEDGE: Buy 1 lot OTM Put to protect against Global decoupling.")
+            
+        if gap_info['up_prob'] > 0.6 and bias == "BEARISH":
+            tactics.append("TRAP: Possible Gap-Up Short Squeeze. Don't short at open.")
+
+        if tactical['firefight']:
+            tactics.append("CRITICAL: Market in High-Vol Reversal. Reduce position size by 50%.")
+            
+        if not tactics:
+            tactics.append("STABLE: Follow standard delta hedging rules (Delta 0.15).")
+            
+        return tactics
 
     # ═══════════════════════════════════════════════════════════════════════
     # RECOVERY PROBABILITY (Brownian Pattern Matching)
     # ═══════════════════════════════════════════════════════════════════════
-    def predict_recovery(self, entry, current):
-        dist_pct = (current - entry) / entry
+    def predict_recovery(self, entry, target):
+        """
+        Estimate probability of price reaching target within 5 trading days
+        Uses historical volatility and distance-based Brownian motion
+        """
         df = self.data_1d
+        current = df['close'].iloc[-1]
         
-        # Simplified Brownian Probability
-        # P = 2 * (1 - norm.cdf(dist/vol))
-        vol = df['volatility'].iloc[-1] / np.sqrt(252)
-        prob = 1.0 - abs(dist_pct) / (vol * 5) # 5-day window
-        return max(0.1, min(0.95, prob))
+        # Distance from current price to target
+        dist_pct = abs(target - current) / current
+        
+        # Daily volatility (annualized / sqrt(252))
+        vol_daily = df['volatility'].iloc[-1] / np.sqrt(252)
+        
+        # 5-day window: vol scales with sqrt(time)
+        vol_5d = vol_daily * np.sqrt(5)
+        
+        # Probability using normal CDF
+        # P(reaching target) = 2 * (1 - norm.cdf(distance / volatility))
+        z_score = dist_pct / vol_5d if vol_5d > 0 else 10
+        prob = 2 * (1 - norm.cdf(z_score))
+        
+        return max(0.05, min(0.95, prob))
 
     # ═══════════════════════════════════════════════════════════════════════
     # FUSION SENTIMENT (The "Mind" of the Prophet)
     # ═══════════════════════════════════════════════════════════════════════
-    def get_fusion_sentiment(self):
+    def get_fusion_sentiment(self, target_spot=None):
         latest = self.data_1d.iloc[-1]
-        regime = self.regime_map.get(latest['regime'], "UNKNOWN")
+        
+        # Determine Regime (Actual or Projected)
+        if target_spot:
+            sim_row = self.rebuild_row_with_spot(target_spot)
+            feat_vals = sim_row[self.hmm_features].values.reshape(1, -1)
+            feat_vals_scaled = self.scaler.transform(feat_vals)
+            regime_idx = self.hmm_model.predict(feat_vals_scaled)[0]
+        else:
+            regime_idx = latest['regime']
+            
+        regime = self.regime_map.get(regime_idx, "UNKNOWN")
         
         # AI Sentiment (HMM + LSTM Forecast)
         ai_score = 1 if regime == "BULLISH" else -1 if regime == "BEARISH" else 0
@@ -433,25 +657,158 @@ class NiftyOptionsProphet:
         if 'sp_returns' in latest:
             if latest['sp_returns'] > 0.5: global_score = 1
             elif latest['sp_returns'] < -0.5: global_score = -1
-            
-        # Fusion
-        total = (ai_score * 0.5) + (tech_score * 0.3) + (global_score * 0.2)
         
+        # GAP MOMENTUM SCORE (Treats overnight gap as fresh information)
+        gap_score = 0
+        if target_spot:
+            gap_pts = target_spot - latest['close']
+            if gap_pts > 100:  # Strong gap-up
+                gap_score = 0.8 + (gap_pts / 500)
+            elif gap_pts < -100:  # Strong gap-down
+                gap_score = -0.8 - (abs(gap_pts) / 500)
+            
+        # [NEW] RL AGENT SENTIMENT (Proximal Policy Optimization)
+        rl_verdict, _ = self.get_rl_verdict()
+        rl_score = 0
+        if rl_verdict == "BULLISH": rl_score = 1
+        elif rl_verdict == "BEARISH": rl_score = -1
+            
+        # Fusion (Weighted Ensemble Strategy)
+        # Weights: AI (25%), Tech (15%), Global (10%), Gap (25%), RL (PPO) (25%)
+        total_score = (ai_score * 25) + (tech_score * 15) + (global_score * 10) + (gap_score * 25) + (rl_score * 25)
+            
+        # LSTM Alignment (Safety Check)
+        # If price is far above LSTM resistance, cap the bullishness
+        # BUT if gap momentum is strong, reduce this penalty (fresh info > historical forecast)
+        sup, res = self.get_lstm_prediction()
+        spot = target_spot if target_spot else latest['close']
+        reasoning = []
+        
+        overvalued_penalty = 5  # Reduced from 0.2/20 scale
+        if gap_score > 0.5 or rl_score > 0.5:
+            overvalued_penalty = 1  # Strong gap or RL reduces overvaluation penalty
+        
+        if res and spot > res:
+            total_score -= overvalued_penalty
+            reasoning.append("OVERVALUED (Spot > AI Resistance)")
+        elif sup and spot < sup:
+            total_score += 5
+            reasoning.append("UNDERVALUED (Spot < AI Support)")
+            
+        if regime == "BULLISH": reasoning.append("Regime: BULLISH")
+        elif regime == "BEARISH": reasoning.append("Regime: BEARISH")
+        
+        if gap_score > 0.5: reasoning.append(f"Gap Momentum: STRONG UP (+{gap_pts:.0f} pts)")
+        elif gap_score < -0.5: reasoning.append(f"Gap Momentum: STRONG DOWN ({gap_pts:.0f} pts)")
+        
+        if global_score > 0: reasoning.append("Globals: POSITIVE")
+        elif global_score < 0: reasoning.append("Globals: WEAK")
+        
+        if rl_score > 0: reasoning.append("RL Agent: BULLISH")
+        elif rl_score < 0: reasoning.append("RL Agent: BEARISH")
+
         bias = "NEUTRAL"
-        if total > 0.3: bias = "BULLISH"
-        elif total < -0.3: bias = "BEARISH"
+        if total_score > 30: bias = "BULLISH"
+        elif total_score < -30: bias = "BEARISH"
         
         # Divergence Detection
         divergence = False
         if global_score == 1 and ai_score == -1: divergence = "BEARISH_DIVERGENT (Nifty lagging Global Rally)"
         elif global_score == -1 and ai_score == 1: divergence = "BULLISH_DIVERGENT (Nifty resisting Global Fall)"
         
-        return {"bias": bias, "confidence": abs(total) * 100, "divergence": divergence}
+        # 5. Total Score for Confidence
+        # Already calculated as total_score in ensemble above
+        
+        notes = reasoning # Start with existing reasoning
+        
+        # 6. ENHANCED VIX FILTERING (Refined Strategy)
+        vix = self.data_1d['vix'].iloc[-1]
+        vix_bias = "NEUTRAL"
+        if vix > 22:
+            vix_bias = "BEARISH (HIGH VOL)"
+            notes.append("VIX > 22: High Gamma Risk. Prefer Defensive Spreads.")
+        elif vix < 12:
+            notes.append("VIX < 12: Low Premium. Avoid Iron Condors.")
+            
+        # Strategy Recommendation Logic
+        final_bias = "NEUTRAL"
+        if total_score > 30: final_bias = "BULLISH"
+        elif total_score < -30: final_bias = "BEARISH"
+        
+        if vix > 22 and final_bias == "BULLISH":
+            notes.append("CAUTION: VIX High. Downshifting to Bull Put Spread instead of Long Call.")
+        
+        return {
+            "bias": final_bias,
+            "vix_bias": vix_bias,
+            "confidence": min(100, abs(total_score)),
+            "divergence": divergence,
+            "regime": self.regime_map.get(self.data_1d['regime'].iloc[-1], "N/A"),
+            "notes": notes
+        }
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # GAP INTELLIGENCE ENGINE [PORTED FROM V2]
+    # ═══════════════════════════════════════════════════════════════════════
+    def predict_gap(self):
+        df = self.data_1d
+        latest = df.iloc[-1]
+        
+        vix = latest.get('vix', 15) / 100
+        vol = latest.get('volatility', 0.15)
+        
+        # Volatility Shock component
+        vol_comp = min(1.0, (vix + vol) * 2)
+        
+        # Clustering component
+        up_rate = latest.get('gap_up_rate', 0.5)
+        down_rate = latest.get('gap_down_rate', 0.5)
+        
+        up_prob = min(1.0, vol_comp * 0.6 + up_rate * 0.7)
+        down_prob = min(1.0, vol_comp * 0.6 + down_rate * 0.7)
+        
+        expected_size = latest.get('gap_std', 0.005) * latest['close']
+        
+        return {"up_prob": up_prob, "down_prob": down_prob, "expected_size": expected_size}
+
+    def get_morning_intel(self):
+        """
+        Interactive startup to capture GIFT Nifty or Overnight shifts
+        """
+        print("\n" + "─"*50)
+        print(" [☀️] MORNING INTEL MODE (Optional)")
+        print("─"*50)
+        manual_gap = input("Any significant GIFT Nifty gap points? (e.g. +200, -150 or Enter for 0): ").strip()
+        
+        if manual_gap and manual_gap != "0":
+            try:
+                gap_pts = float(manual_gap)
+                old_spot = self.data_1d['close'].iloc[-1]
+                new_spot = old_spot + gap_pts
+                
+                print(f"[⚡️] Adjusting Engine for PROJECTED OPEN: {new_spot:,.2f}")
+                
+                # Create a synthetic "Projected" row for prediction
+                # In a real system we'd rebuild all features, 
+                # but for rapid morning pulse we adjust LSTM inputs
+                self.projected_spot = new_spot
+                return True
+            except:
+                print("[!] Invalid input. Using current spot.")
+        
+        self.projected_spot = self.data_1d['close'].iloc[-1]
+        return False
 
     # ═══════════════════════════════════════════════════════════════════════
     # V3 PROFESSIONAL DASHBOARD
     # ═══════════════════════════════════════════════════════════════════════
     def print_pulse(self):
+        """
+        Main Dashboard display
+        """
+        # [V1 FEATURE] Always sync latest price right before dashboard
+        self.sync_live_data()
+        
         latest = self.data_1d.iloc[-1]
         regime = self.regime_map.get(latest['regime'], "UNKNOWN")
         tac = self.detect_tactical()
@@ -462,61 +819,250 @@ class NiftyOptionsProphet:
         ai_sup, ai_res = self.get_lstm_prediction()
         if ai_sup is None: ai_sup, ai_res = spot * 0.98, spot * 1.02
         
-        math_res = spot + (latest['atr'] * 2.0)
-        math_sup = spot - (latest['atr'] * 2.0)
-        flip_level = spot * (1.003 if regime == 'BEARISH' else 0.997)
+        vix = latest.get('vix', 0)
+        rsi = latest.get('rsi_14', 50)
         
-        # 2. Strategy Engine
-        rounded_spot = round(spot / 50) * 50
-        fusion = self.get_fusion_sentiment()
-        signal = fusion['bias']
+        spot = getattr(self, 'projected_spot', latest['close'])
+        is_projected = spot != latest['close']
+
+        # Calculations dependent on spot
+        sr_low, sr_high = self.get_lstm_prediction()
         
-        # Strike Selection (Heuristic)
-        ce_strike = round((ai_res + 100) / 100) * 100
-        pe_strike = round((ai_sup - 100) / 100) * 100
+        # Tactical & Sentiment
+        tactical = self.detect_tactical()
+        raw_sentiment = self.get_fusion_sentiment() # [RAW] No gap adjustment
+        gap_info = self.predict_gap()
+        flip_down, flip_up = self.find_flip_levels()
         
+        # Projected Sentiment if Morning Intel provided
+        is_projected = hasattr(self, 'projected_spot') and self.projected_spot != latest['close']
+        if is_projected:
+            strategic_verdict = self.get_fusion_sentiment(self.projected_spot)
+        else:
+            strategic_verdict = raw_sentiment
+            
+        firefight_tactics = self.get_firefight_tactics(strategic_verdict, tactical, gap_info)
+
         print("\n" + "="*70)
         print(f" NIFTY PROPHET v3: MONOLITHIC PULSE | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         print("="*70)
-        print(f" SPOT PRICE:    {spot:,.2f}")
-        print(f" INDIA VIX:     {vix:.2f} | {'!! LOW PREMIUMS' if vix < 13 else 'OPTIMAL' if vix < 18 else ' !! HIGH RISK'}")
-        print(f" RSI (14):      {latest['rsi_14']:.1f} | {'OS' if latest['rsi_14'] < 30 else 'OB' if latest['rsi_14'] > 70 else 'NEUTRAL'}")
+        if is_projected:
+            print(f" PROJECTED OPEN: {spot:,.2f} (Includes {spot - latest['close']:.1f} pt gap)")
+            print(f" PREVIOUS CLOSE: {latest['close']:,.2f}")
+        else:
+            print(f" SPOT PRICE:    {spot:,.2f}")
+        
+        print(f" INDIA VIX:     {vix:.2f} | {'!! LOW PREMIUMS' if vix < 13 else 'NORMAL' if vix < 18 else '!! HIGH RISK'}")
+        print(f" RSI (14):      {rsi:.1f} | {'OVERBOUGHT' if rsi > 70 else 'OVERSOLD' if rsi < 30 else 'NEUTRAL'}")
         print("="*70)
 
         print("\n" + "-"*70)
         print("  CRITICAL LEVELS       |  AI (LSTM DEEP)       |  TECHNICAL (MATH)")
         print("-"*70)
-        print(f"  RESISTANCE (R1)       |  {ai_res:,.0f} (Forecast)    |  {math_res:,.0f} (ATR*2)")
-        print(f"  SUPPORT (S1)          |  {ai_sup:,.0f} (Forecast)    |  {math_sup:,.0f} (ATR*2)")
-        print(f"  FLIP / STOP LEVEL     |  {flip_level:,.0f} (Dynamic)     |  {rounded_spot:,.0f} (ATM)")
+        print(f"  RESISTANCE (R1)       |  {sr_high:,.0f} (Forecast)    |  {spot + (latest.get('atr', 100)*2):,.0f} (ATR*2)")
+        print(f"  SUPPORT (S1)          |  {sr_low:,.0f} (Forecast)    |  {spot - (latest.get('atr', 100)*2):,.0f} (ATR*2)")
         print("-"*70)
 
-        print("\n" + "="*70)
-        print("                    AI PROPHET VERDICT")
-        print("="*70)
-        print(f"  AI BIAS:          {fusion['bias']} (Conf: {fusion['confidence']:.1f}%)")
-        print(f"  MARKET REGIME:    {regime}")
-        if fusion['divergence']:
-            print(f"  [!] ALERT:         {fusion['divergence']}")
-        print(f"  WHIPSAW RISK:     {tac['whipsaw']*100:.1f}% ({'HIGH' if tac['whipsaw'] > 0.7 else 'LOW'})")
-        print(f"  GLOBAL CORE:      {'BULLISH' if latest.get('sp_returns',0) > 0 else 'BEARISH'} (S&P Pulse)")
-        print(f"  HEAVYWEIGHTS:     {'SUPPORTIVE' if latest.get('ret_rel',0) > 0 else 'DIVERGENT'}")
+        print("\n" + "═"*70)
+        print("                    TACTICAL EXECUTION MATRIX")
+        print("═"*70)
+        print(f"  BULLISH FLIP ABOVE :  {f'{flip_up:,.0f}' if flip_up else 'N/A'}")
+        print(f"  BEARISH FLIP BELOW :  {f'{flip_down:,.0f}' if flip_down else 'N/A'}")
+        print(f"  WHIPSAW ZONE       :  {tactical['band'][0]:,.0f} - {tactical['band'][1]:,.0f}")
+        print(f"  OVERNIGHT GAP UP   :  {gap_info['up_prob']*100:.0f}% (Exp: {gap_info['expected_size']:+.0f} pts)")
+        print(f"  OVERNIGHT GAP DOWN :  {gap_info['down_prob']*100:.0f}% (Exp: {gap_info['expected_size']:+.0f} pts)")
+        
+        print("\n  [🛡️] FIREFIGHT TACTICS:")
+        for t in firefight_tactics:
+            print(f"   >> {t}")
+        print("═"*70)
+
+        if is_projected:
+            print("\n" + "="*70)
+            print("                RAW AI STACK ANALYSIS (HISTORICAL)")
+            print("="*70)
+            print(f"  RAW BIAS:         {raw_sentiment['bias']} (Conf: {raw_sentiment['confidence']:.1f}%)")
+            print(f"  RAW REGIME:       {raw_sentiment['regime']}")
+            if raw_sentiment['divergence']:
+                print(f"  [!] ALERT:         {raw_sentiment['divergence']}")
+            print("="*70)
 
         print("\n" + "="*70)
-        print("            ACTIONABLE TRADE (RL OPTIMIZED)")
+        print(f" {f'STRATEGIC TACTICAL VERDICT (PROJECTED)' if is_projected else 'AI PROPHET VERDICT'}")
         print("="*70)
-        if signal == "NEUTRAL":
-            print(f"  STRATEGY:       Iron Condor (Delta 0.15)")
-            print(f"  STRIKES:        SELL {ce_strike} CE / {pe_strike} PE")
-        elif fusion['bias'] == "BULLISH":
-            print(f"  STRATEGY:       Bull Put Spread (Sovereign)")
-            print(f"  STRIKES:        SELL {pe_strike} PE / BUY {pe_strike-100} PE")
+        print(f"  AI BIAS:          {strategic_verdict['bias']} (Conf: {strategic_verdict['confidence']:.1f}%)")
+        print(f"  MARKET REGIME:    {strategic_verdict['regime']}")
+        if strategic_verdict['notes']:
+            print(f"  REASONING:        {', '.join(strategic_verdict['notes'])}")
+        if strategic_verdict['divergence']:
+            print(f"  [!] ALERT:         {strategic_verdict['divergence']}")
+        print(f"  WHIPSAW RISK:     {tactical['whipsaw']*100:.1f}% ({'HIGH' if tactical['whipsaw'] > 0.7 else 'LOW'})")
+        
+        # GAP INTEL
+        print(f"  GAP PROBABILITY:  UP: {gap_info['up_prob']*100:.0f}% / DOWN: {gap_info['down_prob']*100:.0f}%")
+        
+        print(f"  GLOBAL CORE:      {'BULLISH' if latest.get('sp_returns', 0) > 0.1 else 'BEARISH' if latest.get('sp_returns', 0) < -0.1 else 'NEUTRAL'} (S&P Pulse)")
+        print(f"  HEAVYWEIGHTS:     {'SUPPORTIVE' if latest.get('close_rel', 0) > 0 else 'DRAGGING'}")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # INDIVIDUAL MODEL VERDICTS (NEW SECTION)
+        # ═══════════════════════════════════════════════════════════════════════
+        print("\n" + "═"*70)
+        print("                    🧠 INDIVIDUAL MODEL VERDICTS")
+        print("═"*70)
+        
+        # 1. HMM REGIME VERDICT
+        hmm_regime = strategic_verdict['regime']
+        if hmm_regime == "BULLISH":
+            hmm_rec = "Buy dips. Trend is your friend."
+        elif hmm_regime == "BEARISH":
+            hmm_rec = "Sell rallies. Avoid fresh longs."
         else:
-            print(f"  STRATEGY:       Bear Call Spread (Sovereign)")
-            print(f"  STRIKES:        SELL {ce_strike} CE / BUY {ce_strike+100} CE")
-            
-        print(f"\n  RECOVERY PROB:    {self.predict_recovery(spot+100, spot)*100:.1f}% (Chance of +0.5% Bounce)")
-        print(f"  FIREFIGHT:        {'!! ACTIVE ALERT' if tac['firefight'] else 'SAFE (No Climax Reversal)'}")
+            hmm_rec = "Choppy waters. Wait for regime flip."
+        print(f"  [HMM] REGIME:        {hmm_regime}")
+        print(f"        → {hmm_rec}")
+        
+        # 2. LSTM S/R VERDICT
+        lstm_verdict = "NEUTRAL"
+        if sr_high and spot > sr_high:
+            lstm_verdict = "OVEREXTENDED"
+            lstm_rec = f"Above AI ceiling ({sr_high:,.0f}). Risk of pullback."
+        elif sr_low and spot < sr_low:
+            lstm_verdict = "UNDERVALUED"
+            lstm_rec = f"Below AI floor ({sr_low:,.0f}). Bounce expected."
+        else:
+            lstm_rec = f"Within range [{sr_low:,.0f} - {sr_high:,.0f}]. Respect levels."
+        print(f"  [LSTM] VALUATION:    {lstm_verdict}")
+        print(f"        → {lstm_rec}")
+        
+        # 3. TECH INDICATORS VERDICT
+        tech_bias = "NEUTRAL"
+        if rsi > 60 and latest['macd_h'] > 0:
+            tech_bias = "BULLISH"
+            tech_rec = "Momentum strong. Ride the wave."
+        elif rsi < 40 and latest['macd_h'] < 0:
+            tech_bias = "BEARISH"
+            tech_rec = "Momentum weak. Stay cautious."
+        else:
+            tech_rec = f"RSI={rsi:.0f}, MACD={latest['macd_h']:.1f}. No strong signal."
+        print(f"  [TECH] INDICATORS:   {tech_bias}")
+        print(f"        → {tech_rec}")
+        
+        # 4. GAP MOMENTUM VERDICT (if projected)
+        gap_pts = spot - latest['close'] if is_projected else 0
+        if gap_pts > 100:
+            gap_verdict = "BULLISH"
+            gap_rec = f"Strong gap-up (+{gap_pts:.0f} pts). Fresh buying expected."
+        elif gap_pts < -100:
+            gap_verdict = "BEARISH"
+            gap_rec = f"Strong gap-down ({gap_pts:.0f} pts). Selling pressure likely."
+        else:
+            gap_verdict = "NEUTRAL"
+            gap_rec = "No significant overnight gap."
+        print(f"  [GAP] MOMENTUM:      {gap_verdict}")
+        print(f"        → {gap_rec}")
+        
+        # 5. RL AGENT VERDICT
+        rl_bias, rl_rec = self.get_rl_verdict()
+        print(f"  [PPO] RL AGENT:      {rl_bias}")
+        print(f"        → {rl_rec}")
+        
+        print("═"*70)
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # MASTER VERDICT (FUSION)
+        # ═══════════════════════════════════════════════════════════════════════
+        print("\n" + "="*70)
+        print(" MASTER VERDICT (WEIGHTED FUSION)")
+        print("="*70)
+        print(f"  FINAL BIAS:       {strategic_verdict['bias']} (Conf: {strategic_verdict['confidence']:.1f}%)")
+        if strategic_verdict['notes']:
+            print(f"  REASONING:        {', '.join(strategic_verdict['notes'])}")
+        if strategic_verdict['divergence']:
+            print(f"  [!] ALERT:         {strategic_verdict['divergence']}")
+        
+        # Determine which model drives the decision
+        if gap_pts > 100:
+            driver = "[GAP] Momentum dominates"
+        elif hmm_regime == "BULLISH":
+            driver = "[HMM] Regime is primary driver"
+        elif hmm_regime == "BEARISH":
+            driver = "[HMM] Regime is cautioning"
+        else:
+            driver = "[FUSION] Balanced across models"
+        print(f"  DRIVER:           {driver}")
+        print("="*70)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # ACTIONABLE TRADE (Now clearly shows which model it follows)
+        # ═══════════════════════════════════════════════════════════════════════
+        print("\n" + "="*70)
+        print("            ACTIONABLE TRADE (Follows MASTER VERDICT)")
+        print("="*70)
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ACTIONABLE TRADE
+        # ═══════════════════════════════════════════════════════════════════════
+        print("\n" + "="*70)
+        print("            ACTIONABLE TRADE (Follows MASTER VERDICT)")
+        print("="*70)
+        
+        bias = strategic_verdict['bias']
+        confidence = strategic_verdict['confidence']
+        
+        strategy = "NO TRADE"
+        reason = "Neutral bias"
+
+        # [FILTER] VIX Risk Management
+        if vix > 22:
+            if bias == "BULLISH" and confidence > 50:
+                strategy = "Bull Put Spread (High Vol Protection)"
+            elif bias == "BEARISH" and confidence > 50:
+                strategy = "Bear Call Spread (High Vol Protection)"
+            else:
+                strategy = "NO TRADE"
+                reason = "VIX > 22 (Extreme Risk). Safety first."
+        elif vix < 12:
+            if bias == "NEUTRAL":
+                strategy = "NO TRADE"
+                reason = "VIX < 12 (Low Premium Trap). Avoid Iron Condors."
+            else:
+                strategy = "Naked Options (Low Premium environment)"
+        else:
+            # Standard Logic
+            if bias == "BULLISH" and confidence > 50:
+                strategy = "Long Call Spread (+1.5% Target)"
+            elif bias == "BEARISH" and confidence > 50:
+                strategy = "Long Put Spread (-1.5% Target)"
+            elif bias == "BULLISH":
+                strategy = "Bull Put Spread"
+            elif bias == "BEARISH":
+                strategy = "Bear Call Spread"
+            else:
+                strategy = "Iron Condor (Delta 0.15)"
+
+        print(f"  STRATEGY:       {strategy}")
+        if strategy == "NO TRADE":
+            print(f"  REASON:         {reason}")
+        
+        # [DYNAMIC BOUNDARIES]
+        if "Iron Condor" in strategy:
+            # Range scales with VIX: 1.5% at VIX 15
+            vix_range_pct = 0.015 * (vix / 15)
+            ce_strike = round((spot * (1 + vix_range_pct))/50)*50
+            pe_strike = round((spot * (1 - vix_range_pct))/50)*50
+            print(f"  STRIKES:        SELL {ce_strike:.0f} CE / {pe_strike:.0f} PE")
+            print(f"  RANGE:          {vix_range_pct*100:.2f}% ({spot*(1-vix_range_pct):,.0f} - {spot*(1+vix_range_pct):,.0f})")
+        elif "Spread" in strategy:
+            atm = round(spot/100)*100
+            if "Bull" in strategy:
+                print(f"  STRIKES:        SELL {atm-100} PE / BUY {atm-300} PE")
+            else:
+                print(f"  STRIKES:        SELL {atm+100} CE / BUY {atm+300} CE")
+
+        rec_prob = self.predict_recovery(spot, spot * 1.005) # Prob of 0.5% bounce
+        print(f"\n  RECOVERY PROB:    {rec_prob*100:.1f}% (Chance of +0.5% Bounce)")
+        print(f"  FIREFIGHT:        {'ACTIVE (Defensive Positioning)' if tactical['firefight'] else 'SAFE (No Climax Reversal)'}")
 
         print("\n" + "-"*70)
         print(" >>> GLOBAL & HEAVYWEIGHT Pulse Matrix:")
@@ -528,6 +1074,22 @@ class NiftyOptionsProphet:
         
         if 'sp_returns' in latest:
              print(f"  S&P 500: {latest['sp_returns']:.2f}% | Correlation: {latest.get('sp_corr_30', 0):.2f}")
+        print("="*70 + "\n")
+
+        # 🦅 THE MANUAL CO-PILOT GUIDE (ELI5)
+        print("="*70)
+        print("                🦅 THE MANUAL CO-PILOT GUIDE (ELI5)")
+        print("="*70)
+        print("  1. HOW TO READ CONVICTION:")
+        print(f"     - Confidence > 50% : HIGH conviction. Full position sizing.")
+        print(f"     - Confidence < 30% : LOW conviction. Half-size or skip.")
+        print("  2. WHERE TO PLACE ARMOR (STRIKES):")
+        print(f"     - Always use the 'STRIKES' suggested above as your boundaries.")
+        print(f"     - They scale with volatility (VIX) to keep you in the 'Safe Zone'.")
+        print("  3. THE GOLDEN RULES:")
+        print(f"     - IF VIX < 12: DO NOT SELL options (Neutral Iron Condors).")
+        print(f"     - IF RSI > 70: Be extra cautious with Bullish bets.")
+        print(f"     - IF FIREFIGHT is ACTIVE: Prioritize getting out over making profit.")
         print("="*70 + "\n")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -574,21 +1136,24 @@ class OptionsProphetEnv(gym.Env):
         if self.continuous:
             # Continuous Reward Logic (Direct Correlation)
             # Action (A) * Return (R)
-            # If A=1.0 (Bull) and R=+2%, Reward = 0.02
-            # If A=-1.0 (Bear) and R=+2%, Reward = -0.02
-            # Penalty for indecision in high vol?
             act_val = float(action[0])
             reward = act_val * next_ret * 100 # Scale up
             
+            # [WALD PHILOSOPHY] Heavy penalty for confident failure
+            if act_val * next_ret < 0:
+                reward *= 2.5 # Make failure 2.5x more painful
+                
             # Bonus for Iron Condor (Near 0 action in low movement)
             if abs(act_val) < 0.2 and abs(next_ret) < 0.015:
                 reward += 0.5
         else:
-            # Discrete Reward Logic
+            # Discrete Reward Logic (toughened penalties)
             if action == 1: # Bull
-                reward = 1.0 if next_ret > 0.01 else -1.0 if next_ret < -0.005 else -0.1
+                # Increased failure penalty to -2.5 from -1.0
+                reward = 1.0 if next_ret > 0.01 else -2.5 if next_ret < -0.005 else -0.3
             elif action == 2: # Bear
-                reward = 1.0 if next_ret < -0.01 else -1.0 if next_ret > 0.005 else -0.1
+                # Increased failure penalty to -2.5 from -1.0
+                reward = 1.0 if next_ret < -0.01 else -2.5 if next_ret > 0.005 else -0.3
             elif action == 3: # Condor
                 reward = 0.5 if abs(next_ret) < 0.015 else -1.5
             elif action == 0: # Hold
@@ -607,26 +1172,33 @@ if __name__ == "__main__":
     # Core Training Matrix
     prophet.train_hmm()
     prophet.train_lstm_sr()
+    prophet.train_rl_agent() # Train PPO
+    
+    # Morning Intel (Interactive Gap Catching)
+    prophet.get_morning_intel()
     
     # Pulse Monitoring
     prophet.print_pulse()
     
-    # Example Recovery Analysis
-    print("[RECOVER ANALYSIS] Entry: 25800 | Spot: 25673")
-    prob = prophet.predict_recovery(25800, 25673)
-    print(f"   Probability of Return (5-day window): {prob*100:.1f}%")
+    # Optional Recovery Analysis
+    print("\n" + "─"*50)
+    print(" [🚑] PERSONAL RECOVERY ANALYSIS")
+    entry_input = input("Enter your average entry price for recovery analysis (or Enter to skip): ").strip()
+    if entry_input:
+        try:
+            entry_p = float(entry_input)
+            spot_p = prophet.data_1d['close'].iloc[-1]
+            prob = prophet.predict_recovery(entry_p, spot_p)
+            print(f"[📊] Probability of Return to {entry_p:,.0f} (5-day window): {prob*100:.1f}%")
+        except:
+            print("[!] Invalid entry price.")
     
-    # RL Training Loop (Multi-Model Support)
-    if SB3_AVAILABLE:
-        print(f"\n[RL] DEEP RL ENGINE READY (Observation space: {len(prophet.feature_cols)} dimensions)")
-        
-        # User Selection (Simulated)
-        rl_model_type = "PPO" # Options: PPO, SAC, TD3
-        print(f"[RL] Selected Agent: {rl_model_type} (Discrete Policy)")
-        
-        # PPO (Default)
-        env = DummyVecEnv([lambda: OptionsProphetEnv(prophet.data_1d, prophet.feature_cols, continuous=False)])
-        # model = PPO("MlpPolicy", env, verbose=1).learn(total_timesteps=5000)
+    # RL Training Loop (Demo Mode)
+    # Note: Real training happened inside initialize via train_rl_agent
+    
+    # if SB3_AVAILABLE:
+    #     print(f"\n[RL] DEEP RL ENGINE READY (Observation space: {len(prophet.feature_cols)} dimensions)")
+    #     # ... 
         
         # Example for SAC/TD3 (Commented out):
         # env_cont = DummyVecEnv([lambda: OptionsProphetEnv(prophet.data_1d, prophet.feature_cols, continuous=True)])
