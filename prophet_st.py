@@ -129,7 +129,7 @@ with st.sidebar:
     fidelity_choice = st.radio(
         "Training Fidelity (GLOBAL)",
         ["Quick Scout (5k)", "Deep Veteran (100k)"],
-        index=1,
+        index=0,
         help="Quick Scout = Instant Load. Deep Veteran = High Accuracy (Takes 3 mins)."
     )
     fidelity_steps = 100000 if "Deep" in fidelity_choice else 5000
