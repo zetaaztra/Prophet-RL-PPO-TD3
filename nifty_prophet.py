@@ -130,6 +130,11 @@ class DataEngine:
             df.columns = df.columns.get_level_values(0)
             
         df = df.reset_index()
+        # Robust Date Column Detection
+        if 'Date' in df.columns: df.rename(columns={'Date': 'date'}, inplace=True)
+        elif 'index' in df.columns: df.rename(columns={'index': 'date'}, inplace=True)
+        else: df.rename(columns={df.columns[0]: 'date'}, inplace=True) # Fallback to first col
+        
         df.columns = [col.lower() for col in df.columns]
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
             

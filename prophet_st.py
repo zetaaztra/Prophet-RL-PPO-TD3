@@ -323,10 +323,33 @@ with tab1:
            - **IF FIREFIGHT is ACTIVE:** Prioritize getting out over making profit.
         """)
 
+# ─── TAB 2: CONTINUOUS AI ───
+with tab2:
     st.subheader("🧬 Continuous Conviction (Deep RL)")
     st.write("These models output a raw score from -1.0 (Strong Bear) to +1.0 (Strong Bull).")
 
     rl_col1, rl_col2 = st.columns(2)
+
+    def display_rl_verdict(score, model_name):
+        bias_local = "NEUTRAL"
+        if score > 0.3: bias_local = "BULLISH"
+        elif score < -0.3: bias_local = "BEARISH"
+        
+        st.markdown(f"### {model_name} VERDICT")
+        st.write(f"**LATEST OBSERVATION:** {len(prophet.data_1d)}")
+        st.write(f"**AGENT OUTPUT:** `{score:.4f}`")
+        st.markdown(f"**INTERPRETED BIAS:** `{bias_local}`")
+        
+        st.write("**STRATEGIC RECOMMENDATION:**")
+        if bias_local == "BULLISH":
+            st.success(f">> LONG CONVICTION: {score*100:.1f}%")
+            st.write("Consider: Debit Spreads, Naked Puts (if VIX > 15)")
+        elif bias_local == "BEARISH":
+            st.error(f">> SHORT CONVICTION: {abs(score)*100:.1f}%")
+            st.write(f"Consider: Bear Put Spreads, Call Writing")
+        else:
+            st.info(f">> NEUTRAL / INDECISIVE ({score*100:.1f}%)")
+            st.write("Consider: Iron Condors, Calendars")
 
     if st.button("🚀 IGNITE CONTINUOUS PILOTS"):
         sac_score = train_continuous(prophet, "SAC", fidelity_steps)
@@ -336,24 +359,17 @@ with tab1:
             display_rl_verdict(sac_score, "SAC (Soft Actor-Critic)")
         with rl_col2:
             display_rl_verdict(td3_score, "TD3 (Twin Delayed DDPG)")
-        st.markdown(f"**INTERPRETED BIAS:** `{bias}`")
-        
-        st.write("**STRATEGIC RECOMMENDATION:**")
-        if bias == "BULLISH":
-            st.success(f">> LONG CONVICTION: {score*100:.1f}%")
-            st.write("Consider: Debit Spreads, Naked Puts (if VIX > 15)")
-        elif bias == "BEARISH":
-            st.error(f">> SHORT CONVICTION: {abs(score)*100:.1f}%")
-            st.write(f"Consider: Bear Put Spreads, Call Writing")
-        else:
-            st.info(f">> NEUTRAL / INDECISIVE ({score*100:.1f}%)")
-            st.write("Consider: Iron Condors, Calendars")
 
     with rl_col1:
         if st.button("Run SAC AI (Entropy Explorer)"):
             with st.spinner("Training SAC..."):
-                score = train_continuous(prophet, "SAC")
+                score = train_continuous(prophet, "SAC", fidelity_steps)
                 st.session_state['sac_score'] = score
+        
+        if 'sac_score' in st.session_state:
+            s_score = st.session_state['sac_score']
+            st.progress(float((s_score + 1) / 2)) # Range 0-1 for progress bar
+            display_rl_verdict(s_score, "SAC")
         
         if 'sac_score' in st.session_state:
             s_score = st.session_state['sac_score']
@@ -363,18 +379,18 @@ with tab1:
     with rl_col2:
         if st.button("Run TD3 AI (Stability Optimized)"):
             with st.spinner("Training TD3..."):
-                score = train_continuous(prophet, "TD3")
+                score = train_continuous(prophet, "TD3", fidelity_steps)
                 st.session_state['td3_score'] = score
             
         if 'td3_score' in st.session_state:
             t_score = st.session_state['td3_score']
-            st.progress((t_score + 1) / 2)
+            st.progress(float((t_score + 1) / 2))
             display_rl_verdict(t_score, "TD3")
 
     st.divider()
     st.write("### 🚑 Personal Recovery Analysis")
     entry_p = st.number_input("Enter your average entry price:", value=float(round(projected_spot)))
-    prob = prophet.predict_recovery(entry_p, projected_spot)
+    prob = prophet.predict_recovery(entry_p) # Fixed signature (single arg)
     st.write(f"Probability of returning to **{entry_p:,.0f}** within 5 days: **{prob*100:.1f}%**")
 
 # ─── TAB 3: ELI5 GUIDE ───
