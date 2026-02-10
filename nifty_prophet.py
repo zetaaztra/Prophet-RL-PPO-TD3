@@ -133,7 +133,6 @@ class DataEngine:
         df.columns = [col.lower() for col in df.columns]
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
             
-        self.fetch_time = datetime.now().strftime("%H:%M:%S")
         return DataManager.sync_data(name, df)
 
     @staticmethod
@@ -175,6 +174,7 @@ class NiftyOptionsProphet:
         print(f"  NIFTY PROPHET v3 - INITIALIZING ENGINE (Lookback: {ProphetConfig.TRAIN_YEARS}y)")
         print("="*50)
         # 1. Load Primary Data
+        self.fetch_time = datetime.now().strftime("%H:%M:%S")
         self.data_1d = DataEngine.fetch_historical(ProphetConfig.SYMBOL, "NIFTY_50")
         vix = DataEngine.fetch_historical(ProphetConfig.VIX_SYMBOL, "VIX")
         
@@ -215,10 +215,8 @@ class NiftyOptionsProphet:
         print("[OK] Prophet Engine Ready.")
 
     def sync_live_data(self):
-        """
-        Refetch the latest Spot and VIX prices from yfinance (V1 Style)
-        Ensures the dashboard uses 'NOW' prices instead of 'PREVIOUS CLOSE'
-        """
+        """Sync latest intraday price point to the the daily matrix"""
+        self.fetch_time = datetime.now().strftime("%H:%M:%S")
         live_spot = DataEngine.fetch_live_price(ProphetConfig.SYMBOL)
         live_vix = DataEngine.fetch_live_price(ProphetConfig.VIX_SYMBOL)
         
@@ -620,27 +618,38 @@ class NiftyOptionsProphet:
         Estimate probability of price REACHING target_price within 5 trading days
         Uses the Reflection Principle of Brownian Motion
         """
-        df = self.data_1d
-        current = df['close'].iloc[-1]
-        
-        # Distance from current price to target
-        dist_pct = abs(target_price - current) / current
-        
-        # Daily volatility (annualized / sqrt(252))
-        vol_daily = df['volatility'].iloc[-1] / np.sqrt(252)
-        
-        # 5-day window: vol scales with sqrt(time)
-        vol_5d = vol_daily * np.sqrt(5)
-        
-        # Probability using Reflection Principle: P(max_T >= H) = 2 * P(W_T >= H)
-        # We assume zero drift for a conservative 'random walk' estimate
-        z_score = dist_pct / vol_5d if vol_5d > 0 else 10
-        
-        # Probability of TOUCHING the level within 5 days
-        import scipy.stats as stats
-        prob = 2 * (1 - stats.norm.cdf(z_score))
-        
-        return max(0.01, min(0.99, prob))
+        try:
+            # Force target to float
+            target_price = float(target_price)
+            df = self.data_1d
+            if df is None or df.empty or 'volatility' not in df.columns:
+                return 0.5
+                
+            current = float(df['close'].iloc[-1])
+            
+            # Distance from current price to target
+            dist_pct = abs(target_price - current) / current
+            
+            # Daily volatility (annualized / sqrt(252))
+            vol_val = df['volatility'].iloc[-1]
+            if pd.isna(vol_val) or vol_val <= 0:
+                vol_val = 0.15 # Fallback to 15% vol
+                
+            vol_daily = vol_val / np.sqrt(252)
+            
+            # 5-day window: vol scales with sqrt(time)
+            vol_5d = vol_daily * np.sqrt(5)
+            
+            # Probability using Reflection Principle: P(max_T >= H) = 2 * P(W_T >= H)
+            z_score = dist_pct / vol_5d if vol_5d > 0 else 10
+            
+            # Use scipy.stats.norm for calculation
+            prob = 2 * (1 - norm.cdf(z_score))
+            
+            return float(max(0.01, min(0.99, prob)))
+        except Exception as e:
+            print(f"[RECOVERY] Math Error: {e}")
+            return 0.5
 
     # ═══════════════════════════════════════════════════════════════════════
     # FUSION SENTIMENT (The "Mind" of the Prophet)
