@@ -59,6 +59,7 @@ class ProphetConfig:
     VIX_SYMBOL = "^INDIAVIX"
     SP500_SYMBOL = "^GSPC"
     TRAIN_YEARS = 3   # Modern Context Default (captures 2021-2024 dynamics)
+    FIDELITY_STEPS = 100000 # Default High fidelity
     
     # Heavyweights
     RELIANCE = "RELIANCE.NS"
@@ -132,6 +133,7 @@ class DataEngine:
         df.columns = [col.lower() for col in df.columns]
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
             
+        self.fetch_time = datetime.now().strftime("%H:%M:%S")
         return DataManager.sync_data(name, df)
 
     @staticmethod
@@ -160,6 +162,9 @@ class NiftyOptionsProphet:
         self.hmm_model = None
         self.lstm_model = None
         self.ppo_model = None
+        self.fetch_time = None
+        
+        # Sectoral Data
         self.scaler = StandardScaler()
         self.price_scaler = MinMaxScaler()
         self.regime_map = {}
@@ -405,24 +410,27 @@ class NiftyOptionsProphet:
         print(f"[HMM] Training Market Regime Detector...")
         print(f"[MAP] Regime Mapping: {self.regime_map}") # 0: BEARISH, 1: NEUTRAL, 2: BULLISH
 
-    def train_rl_agent(self):
+    def train_rl_agent(self, total_timesteps=None):
         """
         Train PPO Reinforcement Learning Agent on the fly
         Uses the Deep Intelligent Matrix (84+ Dimensions)
         """
+        if total_timesteps is None:
+            total_timesteps = ProphetConfig.FIDELITY_STEPS
+
         if not SB3_AVAILABLE:
             print("[RL] Stable Baselines 3 not installed. Skipping PPO training.")
             return
 
-        print(f"[RL] Training PPO Agent (Deep Veteran Mode) on {len(self.feature_cols)} Features...")
+        print(f"[RL] Training PPO Agent ({total_timesteps} Steps) on {len(self.feature_cols)} Features...")
         
         # Create Environment
         self.rl_env = DummyVecEnv([lambda: OptionsProphetEnv(self.data_1d, self.feature_cols, continuous=False)])
         
-        # Train Agent (Production Grade: 100,000 High-Fidelity Steps)
+        # Train Agent
         self.ppo_model = PPO("MlpPolicy", self.rl_env, verbose=0, learning_rate=0.0003, ent_coef=0.01)
-        self.ppo_model.learn(total_timesteps=100000) 
-        print("[RL] PPO Agent Trained (High Fidelity: 100k Steps).")
+        self.ppo_model.learn(total_timesteps=total_timesteps) 
+        print(f"[RL] PPO Agent Trained ({total_timesteps} Steps).")
 
     def get_rl_verdict(self):
         """

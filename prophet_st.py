@@ -53,25 +53,52 @@ st.markdown("""
 # ENGINE INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource
-def get_prophet():
+@st.cache_resource
+def get_prophet(lookback_years, fidelity_steps):
     prophet = NiftyOptionsProphet()
+    # Explicitly set lookback before initialization
+    ProphetConfig.TRAIN_YEARS = lookback_years
+    ProphetConfig.FIDELITY_STEPS = fidelity_steps
+    
+    # Progress HUD Logic
+    progress_bar = st.progress(0, text="Eagle Eye initializing...")
+    
+    # Phase 1: Data & Features
+    progress_bar.progress(10, text="Fetching Modern Context Data...")
     prophet.initialize()
+    
+    # Phase 2: Statistical Training
+    progress_bar.progress(30, text="Training Regime Detector (HMM)...")
     prophet.train_hmm()
+    
+    # Phase 3: Neural Forecast
+    progress_bar.progress(50, text="Calculating S/R Zones (LSTM)...")
     prophet.train_lstm_sr()
-    prophet.train_rl_agent() # PPO
+    
+    # Phase 4: Production RL Training (PPO)
+    est_time = "3m" if fidelity_steps > 50000 else "10s"
+    progress_bar.progress(70, text=f"Training PPO Pilot (Fidelity: {fidelity_steps} steps). Est: {est_time}...")
+    prophet.train_rl_agent(total_timesteps=fidelity_steps)
+    
+    progress_bar.progress(100, text="Prophet Fully Operational.")
+    time.sleep(1)
+    progress_bar.empty()
+    
     return prophet
 
-def train_continuous(prophet, model_type="SAC"):
-    st.sidebar.info(f"Training {model_type} Agent...")
+def train_continuous(prophet, model_type="SAC", fidelity_steps=5000):
+    st.sidebar.info(f"Training {model_type} Agent ({fidelity_steps} steps)...")
     env = DummyVecEnv([lambda: OptionsProphetEnv(prophet.data_1d, prophet.feature_cols, continuous=True)])
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.)
     
+    # Selection
     if model_type == "SAC":
         model = SAC("MlpPolicy", env, verbose=0)
     else:
         model = TD3("MlpPolicy", env, verbose=0)
     
-    model.learn(total_timesteps=3000) # Quick train for demo
+    # Real Training
+    model.learn(total_timesteps=fidelity_steps)
     
     # Predict
     latest_raw = prophet.data_1d.iloc[-1][prophet.feature_cols].values.astype(np.float32)
@@ -97,11 +124,20 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Model Configuration")
-    lookback = st.slider("Lookback Years (Memory)", 1, 10, 3, help="How many years of history the AI studies. 3 years is recommended for modern 2024-2026 context.")
+    lookback = st.slider("Lookback Years (Memory)", 1, 10, 3, help="How many years of history the AI studies. 3 years is recommended for modern context.")
     
+    fidelity_choice = st.radio(
+        "Training Fidelity (GLOBAL)",
+        ["Quick Scout (5k)", "Deep Veteran (100k)"],
+        index=1,
+        help="Quick Scout = Instant Load. Deep Veteran = High Accuracy (Takes 3 mins)."
+    )
+    fidelity_steps = 100000 if "Deep" in fidelity_choice else 5000
+
     # Update Config dynamically
-    if lookback != ProphetConfig.TRAIN_YEARS:
+    if lookback != ProphetConfig.TRAIN_YEARS or fidelity_steps != ProphetConfig.FIDELITY_STEPS:
          ProphetConfig.TRAIN_YEARS = lookback
+         ProphetConfig.FIDELITY_STEPS = fidelity_steps
          st.cache_resource.clear() # Force re-train on change
          st.rerun()
 
@@ -118,12 +154,10 @@ with st.sidebar:
 # DATA FETCHING & BRAIN INIT
 # ═══════════════════════════════════════════════════════════════════════════════
 with st.spinner("🦅 Prophet is sensing the market..."):
-    # [NEW] Training Progress Bar Simulation (Visual Feedback)
-    progress_bar = st.progress(0, text="Initializing Brain...")
-    prophet = get_prophet()
-    progress_bar.progress(100, text="Brain Ready.")
+    prophet = get_prophet(lookback, fidelity_steps)
     
     latest = prophet.data_1d.iloc[-1]
+    sync_time = getattr(prophet, 'fetch_time', 'N/A')
     
     # Adjust for Gap
     current_spot = latest['close']
@@ -147,7 +181,7 @@ with st.spinner("🦅 Prophet is sensing the market..."):
 # DASHBOARD LAYOUT
 # ═══════════════════════════════════════════════════════════════════════════════
 st.title("🦅 NIFTY PROPHET V3")
-st.caption(f"Last Intelligence Sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Last Intelligence Sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Data Pulse At: {sync_time} (IST)")
 
 tab1, tab2, tab3 = st.tabs(["🎯 Strategic Verdict", "🧬 Continuous AI", "📚 ELI5 Guide"])
 
@@ -253,8 +287,13 @@ with tab1:
             else:
                 st.success(f"**STRIKES :** ATM ({round(projected_spot/100)*100:.0f}) Spreads")
         with t_col2:
-            rec_prob = prophet.predict_recovery(projected_spot * 1.005)
-            st.metric("RECOVERY PROB (+0.5% Bounce)", f"{rec_prob*100:.1f}%")
+            try:
+                 # Standardize to 0.5% bounce for quick UI feedback
+                 rec_prob = prophet.predict_recovery(float(projected_spot * 1.005))
+                 st.metric("RECOVERY PROB (+0.5% Bounce)", f"{rec_prob*100:.1f}%")
+            except Exception as e:
+                 st.metric("RECOVERY PROB", "N/A")
+                 st.caption(f"Math Edge Case: {e}")
             st.write(f"**FIREFIGHT:** {'🔥 ACTIVE' if tac['firefight'] else '✅ SAFE (No Climax Reversal)'}")
 
     # 7. GLOBAL PULSE MATRIX
@@ -284,20 +323,15 @@ with tab1:
         """)
 
 # ─── TAB 2: CONTINUOUS AI ───
-with tab2:
-    st.subheader("🧬 Continuous Conviction (Deep RL)")
-    st.write("These models output a raw score from -1.0 (Strong Bear) to +1.0 (Strong Bull).")
-    
-    rl_col1, rl_col2 = st.columns(2)
-    
-    def display_rl_verdict(score, model_name):
-        bias = "NEUTRAL"
-        if score > 0.3: bias = "BULLISH"
-        elif score < -0.3: bias = "BEARISH"
+    if st.button("🚀 IGNITE CONTINUOUS PILOTS"):
+        sac_score = train_continuous(prophet, "SAC", fidelity_steps)
+        td3_score = train_continuous(prophet, "TD3", fidelity_steps)
         
-        st.markdown(f"### {model_name} VERDICT")
-        st.write(f"**LATEST OBSERVATION:** {len(prophet.data_1d)}")
-        st.write(f"**AGENT OUTPUT:** `{score:.4f}`")
+        rl_col1, rl_col2 = st.columns(2)
+        with rl_col1:
+            display_rl_verdict(sac_score, "SAC (Soft Actor-Critic)")
+        with rl_col2:
+            display_rl_verdict(td3_score, "TD3 (Twin Delayed DDPG)")
         st.markdown(f"**INTERPRETED BIAS:** `{bias}`")
         
         st.write("**STRATEGIC RECOMMENDATION:**")

@@ -9,3 +9,4 @@ gymnasium
 hmmlearn
 pandas_ta
 tensorflow>=2.20.0
+scipy
