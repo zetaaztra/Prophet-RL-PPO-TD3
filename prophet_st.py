@@ -323,12 +323,15 @@ with tab1:
            - **IF FIREFIGHT is ACTIVE:** Prioritize getting out over making profit.
         """)
 
-# ─── TAB 2: CONTINUOUS AI ───
+    st.subheader("🧬 Continuous Conviction (Deep RL)")
+    st.write("These models output a raw score from -1.0 (Strong Bear) to +1.0 (Strong Bull).")
+
+    rl_col1, rl_col2 = st.columns(2)
+
     if st.button("🚀 IGNITE CONTINUOUS PILOTS"):
         sac_score = train_continuous(prophet, "SAC", fidelity_steps)
         td3_score = train_continuous(prophet, "TD3", fidelity_steps)
         
-        rl_col1, rl_col2 = st.columns(2)
         with rl_col1:
             display_rl_verdict(sac_score, "SAC (Soft Actor-Critic)")
         with rl_col2:

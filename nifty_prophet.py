@@ -1087,7 +1087,7 @@ class NiftyOptionsProphet:
             else:
                 print(f"  STRIKES:        SELL {atm+100} CE / BUY {atm+300} CE")
 
-        rec_prob = self.predict_recovery(spot, spot * 1.005) # Prob of 0.5% bounce
+        rec_prob = self.predict_recovery(spot * 1.005) # Prob of 0.5% bounce
         print(f"\n  RECOVERY PROB:    {rec_prob*100:.1f}% (Chance of +0.5% Bounce)")
         print(f"  FIREFIGHT:        {'ACTIVE (Defensive Positioning)' if tactical['firefight'] else 'SAFE (No Climax Reversal)'}")
 
