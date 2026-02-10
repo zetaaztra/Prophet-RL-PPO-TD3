@@ -88,25 +88,30 @@ def get_prophet(lookback_years, fidelity_steps):
     return prophet
 
 def train_continuous(prophet, model_type="SAC", fidelity_steps=5000):
-    st.sidebar.info(f"Training {model_type} Agent ({fidelity_steps} steps)...")
-    env = DummyVecEnv([lambda: OptionsProphetEnv(prophet.data_1d, prophet.feature_cols, continuous=True)])
-    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.)
-    
-    # Selection
-    if model_type == "SAC":
-        model = SAC("MlpPolicy", env, verbose=0)
-    else:
-        model = TD3("MlpPolicy", env, verbose=0)
-    
-    # Real Training
-    model.learn(total_timesteps=fidelity_steps)
-    
-    # Predict
-    latest_raw = prophet.data_1d.iloc[-1][prophet.feature_cols].values.astype(np.float32)
-    latest_obs = env.normalize_obs(latest_raw)
-    action, _ = model.predict(latest_obs, deterministic=True)
-    
-    return float(action[0])
+    try:
+        st.sidebar.info(f"Training {model_type} Agent ({fidelity_steps} steps)...")
+        env = DummyVecEnv([lambda: OptionsProphetEnv(prophet.data_1d, prophet.feature_cols, continuous=True)])
+        env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.)
+        
+        # Selection
+        if model_type == "SAC":
+            model = SAC("MlpPolicy", env, verbose=0)
+        else:
+            model = TD3("MlpPolicy", env, verbose=0)
+        
+        # Real Training
+        model.learn(total_timesteps=fidelity_steps)
+        
+        # Predict
+        latest_raw = prophet.data_1d.iloc[-1][prophet.feature_cols].values.astype(np.float32)
+        latest_obs = env.normalize_obs(latest_raw)
+        action, _ = model.predict(latest_obs, deterministic=True)
+        
+        return float(action[0])
+    except Exception as e:
+        st.error(f"Intelligence Fail: {model_type} training crashed. Cloud Memory may be full.")
+        print(f"[ERROR] {model_type} Crash: {e}")
+        return 0.0
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -369,11 +374,6 @@ with tab2:
         if 'sac_score' in st.session_state:
             s_score = st.session_state['sac_score']
             st.progress(float((s_score + 1) / 2)) # Range 0-1 for progress bar
-            display_rl_verdict(s_score, "SAC")
-        
-        if 'sac_score' in st.session_state:
-            s_score = st.session_state['sac_score']
-            st.progress((s_score + 1) / 2) # Range 0-1 for progress bar
             display_rl_verdict(s_score, "SAC")
 
     with rl_col2:
